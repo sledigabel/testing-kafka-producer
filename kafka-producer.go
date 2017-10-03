@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 	"time"
-
-	"github.com/confluentinc/confluent-kafka-go/kafka"
+	"context"
+	"github.com/segmentio/kafka-go"
 	"github.com/google/uuid"
 )
 
@@ -54,32 +54,19 @@ func readMessages(){
 	}
 }
 
-func sendMessages(p *kafka.Producer,topic string){
+func sendMessages(w *kafka.Writer){
 	// TODO
 	//fmt.Println(producer,kfk_prod,topic)
-	deliveryChan := make(chan kafka.Event)
 	PrintDebug("Starting sending to Kafka")
 	for i := range msgChan{
 		if i == "EOF" {
 			break
 		}
-		//fmt.Println(i)
-		err := p.Produce(&kafka.Message{TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny}, Value: []byte(i)},deliveryChan)
+		err := w.WriteMessages(context.Background(),kafka.Message{Value: []byte(i)})
 		if err != nil {
-			fmt.Printf("ERROR: Sending data to kafka failed")
-			os.Exit(2)
+			fmt.Printf("Failed to publish messages: %s\n", err)
+			os.Exit(1)
 		}
-
-		e := <-deliveryChan
-		m := e.(*kafka.Message)
-
-		if m.TopicPartition.Error != nil {
-			fmt.Printf("Delivery failed: %v\n", m.TopicPartition.Error)
-		} else {
-			fmt.Printf("Delivered message to topic %s [%d] at offset %v\n",
-				*m.TopicPartition.Topic, m.TopicPartition.Partition, m.TopicPartition.Offset)
-		}
-
 	}
 }
 
@@ -122,18 +109,18 @@ func main() {
 		PrintDebug(fmt.Sprintf("Using duration %s", duration))
 	}
 
-	msgChan = make(chan string,1000)
+	msgChan = make(chan string,10)
 
 	// initiating the connection to kafka
 	if !dryrun {
 		PrintDebug("Connecting to Kafka")
-		p, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": *param_bootstrap})
-		if err != nil {
-			fmt.Printf("ERROR: Failed to create producer: %s\n", err)
-			os.Exit(1)
-		}
-		defer p.Close()
-		go sendMessages(p,*param_topic)
+		w := kafka.NewWriter(kafka.WriterConfig{
+			Brokers: []string{*param_bootstrap},
+			Topic:   *param_topic,
+			Balancer: &kafka.LeastBytes{},
+		})
+		defer w.Close()
+		go sendMessages(w)
 	} else {
 		go readMessages()
 	}
