@@ -5,15 +5,15 @@ import (
 	"fmt"
 	"os"
 	"time"
-	"context"
-	"github.com/segmentio/kafka-go"
+	"strings"
+	"github.com/Shopify/sarama"
 	"github.com/google/uuid"
 )
 
 var debug bool
 var dryrun bool
 
-var msgChan chan kafka.Message
+var msgChan chan *sarama.ProducerMessage
 var done chan bool
 var sent chan bool
 
@@ -34,7 +34,7 @@ func usage() {
 
 
 //
-func ProduceMessages(number int, timeout time.Duration){
+func ProduceMessages(number int, timeout time.Duration, topic string){
 	ticker := time.NewTicker(time.Second)
 	goodbye := time.NewTimer(timeout)
 
@@ -44,8 +44,7 @@ func ProduceMessages(number int, timeout time.Duration){
 				PrintDebug("BLEEP")
 				for i := 1; i <= number; i++ {
 					u := uuid.New()
-					// TODO: make a better msg using json
-					msgChan <- kafka.Message{Value: []byte(fmt.Sprintf("%s%s%s",u.String(),u.String(),u.String()))}
+					msgChan <- &sarama.ProducerMessage{Topic: topic, Value: sarama.StringEncoder(u.String())}
 				}
 			case <- goodbye.C:
 				PrintDebug("Timeout!")
@@ -62,43 +61,31 @@ func ProduceMessages(number int, timeout time.Duration){
 func readMessages(){
 	PrintDebug("Starting reading thread")
 	for i := range msgChan{
-		fmt.Println(string(i.Value))
+		fmt.Println(i.Value)
 	}
 	sent <- true
 	PrintDebug("Finished reading thread")
 }
 
-func sendMessages(w *kafka.Writer){
-	// TODO
-	//fmt.Println(producer,kfk_prod,topic)
+func sendMessages(p sarama.AsyncProducer){
 	PrintDebug("Starting sending to Kafka")
-
-	batch := make([]kafka.Message,0)
+	var enqueued int
+	var errors int
 
 	for k := range msgChan {
-		if len(batch) < batchSize {
-			batch = append(batch, k)
-		} else {
-			PrintDebug("Sending batch full of data")
-			err := w.WriteMessages(context.Background(),batch...)
-			if err != nil {
-				fmt.Printf("Failed to publish messages: %s\n", err)
-				os.Exit(1)
-			}
-			batch = []kafka.Message{k}
-		}
-		//PrintDebug(fmt.Sprintf("Batchsize : %d",len(batch)))
-	}
-	PrintDebug("Ending")
-	// no more messages, flush
-	if len(batch) > 0{
-		err := w.WriteMessages(context.Background(),batch...)
-		if err != nil {
-			fmt.Printf("Failed to publish messages: %s\n", err)
-			os.Exit(1)
+
+		select {
+		case err := <-p.Errors():
+			errors++
+			PrintDebug(fmt.Sprint("Failed to produce message:", err))
+		default:
+			p.Input() <- k
+			enqueued++
 		}
 	}
+
 	PrintDebug("Finished reading thread")
+	PrintDebug(fmt.Sprintf("Processed %d msgs and %d errors",enqueued,errors))
 	sent <- true
 }
 
@@ -134,26 +121,31 @@ func main() {
 		fmt.Println("ERROR: --duration must be a duration format (e.g. 5m, 10s, 5h")
 	}
 
-	msgChan = make(chan kafka.Message,100000)
+	msgChan = make(chan *sarama.ProducerMessage,100000)
 	done = make(chan bool)
 	sent = make(chan bool)
 
 	// initiating the connection to kafka
 	if !dryrun {
 		PrintDebug("Connecting to Kafka")
-		w := kafka.NewWriter(kafka.WriterConfig{
-			Brokers: []string{*param_bootstrap},
-			Topic:   *param_topic,
-			Balancer: &kafka.LeastBytes{},
-		})
-		defer w.Close()
-		go sendMessages(w)
+		PrintDebug(fmt.Sprint(strings.Split(*param_bootstrap,",")))
+		config := sarama.NewConfig()
+		config.Producer.Retry.Max = 5
+		config.Producer.RequiredAcks = sarama.WaitForAll
+		config.Producer.Partitioner = sarama.NewRandomPartitioner
+		p, err := sarama.NewAsyncProducer(strings.Split(*param_bootstrap,","), config)
+		if err != nil {
+			panic(err)
+		}
+
+		defer p.Close()
+		go sendMessages(p)
 	} else {
 		go readMessages()
 	}
 
 	PrintDebug(fmt.Sprintf("Will produce messages at %d msg/sec for %s\n",*param_rate,duration))
-	go ProduceMessages(*param_rate,duration)
+	go ProduceMessages(*param_rate,duration,*param_topic)
 
 	<- done
 	<- sent
