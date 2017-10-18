@@ -187,7 +187,5 @@ func main() {
 		}
 	}
 	PrintDebug("Finished producing")
-
 	<- sent
-
 }

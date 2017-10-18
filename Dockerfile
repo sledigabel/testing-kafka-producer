@@ -10,4 +10,4 @@ RUN go build /kafka-producer.go
 COPY start.sh /
 RUN chmod 755 /start.sh
 
-CMD /kafka-producer.go $@
+CMD exec /kafka-producer.go $@

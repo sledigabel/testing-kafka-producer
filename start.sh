@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 
 OPTIONS=""
 
@@ -37,5 +38,5 @@ then
   OPTIONS="$OPTIONS -size ${SIZE}"
 fi
 
-echo /kafka-producer ${OPTIONS}
-/kafka-producer ${OPTIONS}
+echo "/kafka-producer ${OPTIONS}"
+exec /kafka-producer ${OPTIONS}
