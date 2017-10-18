@@ -8,6 +8,8 @@ import (
 	"strings"
 	"github.com/Shopify/sarama"
 	"github.com/google/uuid"
+	"os/signal"
+	"syscall"
 )
 
 var debug bool
@@ -33,33 +35,33 @@ func usage() {
 }
 
 
+////
+//func ProduceMessages(number int, timeout time.Duration, topic string, size int){
+//	ticker := time.NewTicker(time.Second)
+//	goodbye := time.NewTimer(timeout)
 //
-func ProduceMessages(number int, timeout time.Duration, topic string, size int){
-	ticker := time.NewTicker(time.Second)
-	goodbye := time.NewTimer(timeout)
-
-	for{
-		select {
-			case <- ticker.C:
-				PrintDebug("BLEEP")
-				for i := 1; i <= number; i++ {
-					// randomize a new msg
-					u := uuid.New().String()
-					// repeat until reaching the msg size then trimming it
-					s := strings.Repeat(u, size/len(u) + 1)[:size]
-					msgChan <- &sarama.ProducerMessage{Topic: topic, Value: sarama.StringEncoder(s)}
-				}
-			case <- goodbye.C:
-				PrintDebug("Timeout!")
-				PrintDebug("Finished producing")
-				done <- true
-				close(msgChan)
-				return
-		}
-	}
-	PrintDebug("Finished producing")
-	done <- true
-}
+//	for{
+//		select {
+//			case <- ticker.C:
+//				PrintDebug("BLEEP")
+//				for i := 1; i <= number; i++ {
+//					// randomize a new msg
+//					u := uuid.New().String()
+//					// repeat until reaching the msg size then trimming it
+//					s := strings.Repeat(u, size/len(u) + 1)[:size]
+//					msgChan <- &sarama.ProducerMessage{Topic: topic, Value: sarama.StringEncoder(s)}
+//				}
+//			case <- goodbye.C:
+//				PrintDebug("Timeout!")
+//				PrintDebug("Finished producing")
+//				done <- true
+//				close(msgChan)
+//				return
+//		}
+//	}
+//	PrintDebug("Finished producing")
+//	done <- true
+//}
 
 func readMessages(){
 	PrintDebug("Starting reading thread")
@@ -81,6 +83,9 @@ func sendMessages(p sarama.AsyncProducer){
 		case err := <-p.Errors():
 			errors++
 			PrintDebug(fmt.Sprint("Failed to produce message:", err))
+			// TODO handle this a bit more gracefully.
+			p.AsyncClose()
+			panic(err)
 		default:
 			p.Input() <- k
 			enqueued++
@@ -96,7 +101,7 @@ func main() {
 	param_help := flag.Bool("help", false, "prints usage")
 	param_bootstrap := flag.String("bootstrap", "", "Comma separated list, typically localhost:9092")
 	param_rate := flag.Int("rate", 10, "msg rate per sec")
-	param_duration := flag.String("duration", "5y", "Time lapse to send the logs")
+	param_duration := flag.String("duration", "5h", "Time lapse to send the logs")
 	param_topic := flag.String("topic","test-kafka","topic to send msgs to")
 	param_msgsize := flag.Int("size", 100,"Minimum message size")
 	flag.BoolVar(&dryrun,"dryrun", false,"prints in stdout instead of kafka")
@@ -134,6 +139,7 @@ func main() {
 	msgChan = make(chan *sarama.ProducerMessage,100000)
 	done = make(chan bool)
 	sent = make(chan bool)
+	sigs := make(chan os.Signal)
 
 	// initiating the connection to kafka
 	if !dryrun {
@@ -155,9 +161,33 @@ func main() {
 	}
 
 	PrintDebug(fmt.Sprintf("Will produce messages at %d msg/sec for %s\n",*param_rate,duration))
-	go ProduceMessages(*param_rate,duration,*param_topic, *param_msgsize)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
-	<- done
+	ticker := time.NewTicker(time.Second)
+	goodbye := time.NewTimer(duration)
+
+	MAIN:
+	for{
+		select {
+		case <- ticker.C:
+			for i := 1; i <= *param_rate ; i++ {
+				// randomize a new msg
+				u := uuid.New().String()
+				// repeat until reaching the msg size then trimming it
+				s := strings.Repeat(u, *param_msgsize/len(u) + 1)[:*param_msgsize]
+				msgChan <- &sarama.ProducerMessage{Topic: *param_topic, Value: sarama.StringEncoder(s)}
+			}
+		case <- goodbye.C:
+			PrintDebug("Finished producing")
+			close(msgChan)
+		case <- sigs:
+			PrintDebug("Caught Interruption signal")
+			close(msgChan)
+			break MAIN
+		}
+	}
+	PrintDebug("Finished producing")
+
 	<- sent
 
 }
